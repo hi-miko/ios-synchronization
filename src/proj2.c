@@ -8,6 +8,11 @@
 #include <errno.h>  // TODO for errno, but it might be included already somewhere
 #include <sys/mman.h> // mmap + macros
 #include <time.h>
+#include <stdbool.h>
+#include <stdarg.h> // TODO might be already included somewhere
+
+#define SEM_CNT 5
+#define ROW_CNT 3
 
 FILE *fp = NULL;
 //TODO before finishing add werror to makefile
@@ -62,6 +67,15 @@ void is_num(char *str)
 	}
 }
 
+void run_sem_fce(int (*f)(sem_t *), sem_t *semaphore)
+{
+	if((*f)(semaphore) == -1)
+	{
+		perror("Error");
+		exit(1);
+	}
+}
+
 void check_args(int argc, char **argv)
 {
 	for(int i = 1; i < argc; i++)
@@ -96,8 +110,9 @@ FILE *init_file()
 {
 	char filename[] = "proj2.out";
 	FILE *fp = NULL;
-
-	fp = fopen(filename, "a+");
+	
+	// TODO the thought is that it will first clear the file and then open for appending, but I might be able to just open for writing
+	fp = fopen(filename, "w");
 	if(fp == NULL)
 	{
 		fprintf(stderr, "Error: file could not be opened\n");
@@ -107,30 +122,143 @@ FILE *init_file()
 	return fp;
 }
 
-void customer_logic(int id)
+int get_nonempty_queue(sem_t *sem_arr[], int num_arr[], int len)
 {
-	printf("Hello from customer id: %d\n", id);
+	if(len <= 0)
+	{
+		return -1;
+	}
+
+	int index = num_arr[get_rand_num(0, len-1)];
+	int sem_val;
+
+	if(sem_getvalue(sem_arr[index], &sem_val) == -1)
+	{
+		perror("Error");
+		exit(1);
+	}
+
+	if(sem_val <= 0)
+	{
+		return index;
+	}
+	
+	int new_num_arr[SEM_CNT];
+
+	int j = 0;
+	for(int i = 0; i < len; i++)
+	{
+		if(num_arr[i] != index)
+		{
+			new_num_arr[j++] = num_arr[i];
+		}
+	}
+
+	return get_nonempty_queue(sem_arr, new_num_arr, len-1);
 }
 
-void clerk_logic(int id)
+void save_to_sem_file(sem_t *sem_arr[], char *str, int argc,...)
 {
-	printf("Hello from clerk id: %d\n", id);
+	va_list argv;
+	va_start(argv, argc);
+
+	run_sem_fce(sem_wait, sem_arr[1]);
+	vfprintf(fp, str, argv);
+	fflush(fp);
+	run_sem_fce(sem_post, sem_arr[1]);
 }
 
-int create_process(char type, int *cnt, sem_t *exit_cnt)
+void customer_logic(int id, sem_t *sem_arr[], bool *is_closed, int tz)
+{
+	save_to_sem_file(sem_arr, "A: Z %d: started\n", 1, id);
+
+	int rand_num = get_rand_num(0, tz);
+	usleep(rand_num);
+
+	if(*is_closed)
+	{
+		save_to_sem_file(sem_arr, "A: Z %d: going home\n", 1, id);
+		return;
+	}
+
+	rand_num = get_rand_num(1, 3);
+	save_to_sem_file(sem_arr, "A: Z %d: entering office for a service %d\n", 2, id, rand_num);
+
+	// rows are indexed as row number + 1
+	printf("Customer waiting at row with the index: %d\n", rand_num+1);
+	fflush(stdout);
+
+	run_sem_fce(sem_wait, sem_arr[rand_num+1]);
+	save_to_sem_file(sem_arr, "A: Z %d: called by office worker\n", 1, id);
+
+	rand_num = get_rand_num(0, 10);
+	usleep(rand_num);
+
+	save_to_sem_file(sem_arr, "A: Z %d: going home\n", 1, id);
+}
+
+void clerk_logic(int id, sem_t *sem_arr[], bool *is_closed, int tu)
+{
+	save_to_sem_file(sem_arr, "A: U %d: started\n", 1, id);
+	
+	int non_empty_index = -1, rand_num = 0;
+	int index_arr[] = {2, 3, 4};
+	while(true)
+	{
+		non_empty_index = get_nonempty_queue(sem_arr, index_arr, 3);
+		if(non_empty_index == -1)
+		{
+			printf("is closed?(%d)\n", *is_closed);
+			fflush(stdout);
+
+			if(*is_closed == true)
+			{
+				printf("yes its closed\n");
+				fflush(stdout);
+				save_to_sem_file(sem_arr, "A: U %d: going home\n", 1, id);
+
+				return;
+			}
+			
+			printf("no its open\n");
+			fflush(stdout);
+			save_to_sem_file(sem_arr, "A: U %d: taking a break\n", 1, id);
+
+			rand_num = get_rand_num(0, tu);
+			usleep(rand_num);
+			save_to_sem_file(sem_arr, "A: U %d: break finished\n", 1, id);
+
+			continue;
+		}
+
+		// indexes of types are offset by 2
+		save_to_sem_file(sem_arr, "A: U %d: serving a service of type %d\n", 2, id, non_empty_index-2);
+
+		printf("Clerk tending to row with the index: %d\n", non_empty_index);
+		fflush(stdout);
+		run_sem_fce(sem_post, sem_arr[non_empty_index]);
+
+		rand_num = get_rand_num(0, 10);
+		usleep(rand_num);
+		save_to_sem_file(sem_arr, "A: U %d: service finished\n", 1, id);
+
+		continue;
+	}
+}
+
+int create_process(char type, int *cnt, sem_t *sem_arr[], bool *is_closed, int tz, int tu)
 {
 	int pid = fork();
+
 	if(pid == 0)
 	{
 		if(type == 'Z')
 		{
-			usleep(300000);
-			customer_logic(*cnt);
+			customer_logic(*cnt, sem_arr, is_closed, tz);
 		}
 		else if(type == 'U')
 		{
-			usleep(300000);
-			clerk_logic(*cnt);
+			clerk_logic(*cnt, sem_arr, is_closed, tu);
 		}
 		else
 		{
@@ -139,7 +267,7 @@ int create_process(char type, int *cnt, sem_t *exit_cnt)
 		}
 		
 		fclose(fp);
-		sem_post(exit_cnt);
+		sem_post(sem_arr[0]);
 		exit(0);
 	}
 	else if(pid > 0)
@@ -154,6 +282,49 @@ int create_process(char type, int *cnt, sem_t *exit_cnt)
 	}
 
 	return pid;
+}
+
+void destroy_sems(sem_t *sem_arr[])
+{
+	for(int i = 0; i < SEM_CNT; i++)
+	{
+		if(sem_arr[i] != NULL)
+		{
+			run_sem_fce(sem_destroy, sem_arr[i]);
+		}
+	}
+}
+
+//TODO typedef this shit cause I have no idea if even I can understand this
+void create_shared_memory(sem_t *(*sem_arr)[], int *(*customer_cnt)[], bool **is_closed)
+{
+	// semaphore creation
+	for(int i = 0; i < SEM_CNT; i++)
+	{
+		//TODO fail?
+		if(((*sem_arr)[i] = (sem_t *)mmap(NULL, sizeof(sem_t *), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0)) == (sem_t *)-1)
+		{
+			perror("Error");
+			exit(1);
+		}
+	}
+
+	// customer count creation
+	for(int i = 0; i < SEM_CNT; i++)
+	{
+		if(((*customer_cnt)[i] = (int *)mmap(NULL, sizeof(int *), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0)) == (int *)-1)
+		{
+			perror("Error");
+			exit(1);
+		}
+	}
+
+	// is file closed
+	if((*is_closed = (bool *)mmap(NULL, sizeof(bool), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0)) == (bool *)-1)
+	{
+		perror("Error");
+		exit(1);
+	}
 }
 
 int main(int argc, char **argv)
@@ -185,58 +356,86 @@ int main(int argc, char **argv)
 	// nz -> number of customers, nu -> number of clerks, tz -> maximum time in ms that a customer waits after creation before entering,
 	// tu -> maximum length of a clerk's break in ms, f -> maximum time in ms that the post office is closed to new customers.
 	int nz = atoi(argv[1]), nu = atoi(argv[2]), tz = atoi(argv[3]), tu = atoi(argv[4]), f = atoi(argv[5]);
-
+	
 	fp = init_file();
 	//anything that happens here is thread safe, because no other process will ever get here and its started before any processes are forked
-	void *exit_cnt = 0;
+	// [0] -> exit counter, [1] -> writer mutex, [2] -> row/line 1, [3] -> row/line 2, [4] -> row/line3
+	sem_t *sem_arr[SEM_CNT];
+	int *customer_cnt[ROW_CNT];
 
-	if((exit_cnt = mmap(NULL, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0)) == (void *)-1)
+	for(int i = 0; i < SEM_CNT; i++)
 	{
-		perror("Error");
-		exit(1);
+		sem_arr[i] = NULL;
 	}
 
-	exit_cnt = (sem_t *) exit_cnt;
-
-	if(sem_init(exit_cnt, 1, 0) == -1)
+	for(int i = 0; i < ROW_CNT; i++)
 	{
-		perror("Error");
-		return 1;
+		customer_cnt[i] = NULL;
 	}
 	
+	bool *is_closed = NULL;
+
+	create_shared_memory(&sem_arr, &customer_cnt, &is_closed);
+
+	*is_closed = false;
+	
+	//TODO maybe think about changing this 2 indents
+	for(int i = 0; i < SEM_CNT; i++)
+	{
+		if(sem_arr[i] == NULL)
+		{
+			fprintf(stderr, "Error: Non existant semaphore trying to be initialized\n");
+			exit(1);
+		}
+
+		if(i == 1)
+		{
+			if(sem_init(sem_arr[1], 1, 1) == -1)
+			{
+				perror("Error");
+				return 1;
+			}
+		}
+		else
+		{
+			if(sem_init(sem_arr[i], 1, 0) == -1)
+			{
+				perror("Error");
+				return 1;
+			}
+		}
+	}
+
 	// main program loop
-	int customer_cnt = 1, clerk_cnt = 1;
+	int customer_count = 1, clerk_cnt = 1;
 	for(int i = 0; i < nz; i++)
 	{
-		int pid1 = create_process('Z', &customer_cnt, exit_cnt);
-		printf("Main process created child process 'Z' with pid: %d\n", pid1);
+		create_process('Z', &customer_count, sem_arr, is_closed, tz, tu);
 	}
 
 	for(int i = 0; i < nu; i++)
 	{
-		int pid1 = create_process('U', &clerk_cnt, exit_cnt);
-		printf("Main process created child process 'U' with pid: %d\n", pid1);
+		create_process('U', &clerk_cnt, sem_arr, is_closed, tz, tu);
 	}
 	
-	// TODO delete debug
 	int rand_num = get_rand_num(f/2, f);
-	printf("Sleeping for %d us\n", rand_num);
 	usleep(rand_num);
 	
-	// semaphore here
-	char msg[] = "A: closing\n";
-	fwrite(msg, 1, strlen(msg), fp);
+	printf("Its not closed!\n");
+	fflush(stdout);
+	*is_closed = true;
+	printf("Its CLOSED FUCKERS!\n");
+	fflush(stdout);
+
+	save_to_sem_file(sem_arr, "A: U %d: service finished\n", 0);
 
 	// Wait for child processes to finish
 	for(int i = 0; i < nu+nz; i++)
 	{
-		if(sem_wait(exit_cnt) == -1)
-		{
-			perror("Error");
-			return 1;
-		}
+		run_sem_fce(sem_wait, sem_arr[0]);	
 	}
-
-	sem_destroy(exit_cnt);
+	
+	printf("finished!\n");
+	destroy_sems(sem_arr);
 	fclose(fp);
 }
