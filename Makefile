@@ -1,7 +1,7 @@
 CXX = gcc
 CC = $(CXX)
 LDLIBS= -pthread -lrt -g
-CFLAGS = -Wall -Wextra -pedantic -std=gnu99 -ggdb
+CFLAGS = -Wall -Wextra -pedantic -std=gnu99 -g
 VPATH = src ./
 EXECUTABLE = proj2
 EXTRA = $(EXECUTABLE).out
