@@ -11,7 +11,7 @@
 #include <stdbool.h>
 #include <stdarg.h> // TODO might be already included somewhere
 
-#define SEM_CNT 5
+#define SEM_CNT 6
 #define ROW_CNT 3
 
 FILE *fp = NULL;
@@ -121,7 +121,10 @@ FILE *init_file()
 
 	return fp;
 }
-
+// TODO the things I believe I still need to do:
+// think about all the race conditions that could happen and try to figure out a way to fix them
+// maybe change the way memory is managed (if it works than just ignore this)
+// add doxygen style comments to every function (not that hard, I dont have a lot of functions)
 int get_nonempty_queue(sem_t *sem_arr[], int num_arr[], int len)
 {
 	if(len <= 0)
@@ -137,6 +140,9 @@ int get_nonempty_queue(sem_t *sem_arr[], int num_arr[], int len)
 		perror("Error");
 		exit(1);
 	}
+
+	printf("The current sem_getvalue at sem %d is %d\n", index, sem_val);
+	fflush(stdout);
 
 	if(sem_val <= 0)
 	{
@@ -157,10 +163,14 @@ int get_nonempty_queue(sem_t *sem_arr[], int num_arr[], int len)
 	return get_nonempty_queue(sem_arr, new_num_arr, len-1);
 }
 
-void save_to_sem_file(sem_t *sem_arr[], char *str, int argc,...)
+void save_to_sem_file(sem_t *sem_arr[], int *action_cnt, char *str, int argc,...)
 {
 	va_list argv;
 	va_start(argv, argc);
+
+	run_sem_fce(sem_wait, sem_arr[5]);
+	(*action_cnt)++;
+	run_sem_fce(sem_post, sem_arr[5]);
 
 	run_sem_fce(sem_wait, sem_arr[1]);
 	vfprintf(fp, str, argv);
@@ -168,38 +178,38 @@ void save_to_sem_file(sem_t *sem_arr[], char *str, int argc,...)
 	run_sem_fce(sem_post, sem_arr[1]);
 }
 
-void customer_logic(int id, sem_t *sem_arr[], bool *is_closed, int tz)
+void customer_logic(int id, sem_t *sem_arr[], bool *is_closed, int *action_cnt, int tz)
 {
-	save_to_sem_file(sem_arr, "A: Z %d: started\n", 1, id);
+	save_to_sem_file(sem_arr, action_cnt, "%d: Z %d: started\n", 2, *action_cnt, id);
 
 	int rand_num = get_rand_num(0, tz);
 	usleep(rand_num);
 
 	if(*is_closed)
 	{
-		save_to_sem_file(sem_arr, "A: Z %d: going home\n", 1, id);
+		save_to_sem_file(sem_arr, action_cnt, "%d: Z %d: going home\n", 2, *action_cnt, id);
 		return;
 	}
 
 	rand_num = get_rand_num(1, 3);
-	save_to_sem_file(sem_arr, "A: Z %d: entering office for a service %d\n", 2, id, rand_num);
+	save_to_sem_file(sem_arr, action_cnt, "%d: Z %d: entering office for a service %d\n", 3, *action_cnt, id, rand_num);
 
 	// rows are indexed as row number + 1
 	printf("Customer waiting at row with the index: %d\n", rand_num+1);
 	fflush(stdout);
 
 	run_sem_fce(sem_wait, sem_arr[rand_num+1]);
-	save_to_sem_file(sem_arr, "A: Z %d: called by office worker\n", 1, id);
+	save_to_sem_file(sem_arr, action_cnt, "%d: Z %d: called by office worker\n", 2, *action_cnt, id);
 
 	rand_num = get_rand_num(0, 10);
 	usleep(rand_num);
 
-	save_to_sem_file(sem_arr, "A: Z %d: going home\n", 1, id);
+	save_to_sem_file(sem_arr, action_cnt, "%d: Z %d: going home\n", 2, *action_cnt, id);
 }
 
-void clerk_logic(int id, sem_t *sem_arr[], bool *is_closed, int tu)
+void clerk_logic(int id, sem_t *sem_arr[], bool *is_closed, int *action_cnt, int tu)
 {
-	save_to_sem_file(sem_arr, "A: U %d: started\n", 1, id);
+	save_to_sem_file(sem_arr, action_cnt, "%d: U %d: started\n", 2, *action_cnt, id);
 	
 	int non_empty_index = -1, rand_num = 0;
 	int index_arr[] = {2, 3, 4};
@@ -215,24 +225,24 @@ void clerk_logic(int id, sem_t *sem_arr[], bool *is_closed, int tu)
 			{
 				printf("yes its closed\n");
 				fflush(stdout);
-				save_to_sem_file(sem_arr, "A: U %d: going home\n", 1, id);
+				save_to_sem_file(sem_arr, action_cnt, "%d: U %d: going home\n", 2, *action_cnt, id);
 
 				return;
 			}
 			
 			printf("no its open\n");
 			fflush(stdout);
-			save_to_sem_file(sem_arr, "A: U %d: taking a break\n", 1, id);
+			save_to_sem_file(sem_arr, action_cnt, "%d: U %d: taking a break\n", 2, *action_cnt, id);
 
 			rand_num = get_rand_num(0, tu);
 			usleep(rand_num);
-			save_to_sem_file(sem_arr, "A: U %d: break finished\n", 1, id);
+			save_to_sem_file(sem_arr, action_cnt, "%d: U %d: break finished\n", 2, *action_cnt, id);
 
 			continue;
 		}
 
 		// indexes of types are offset by 2
-		save_to_sem_file(sem_arr, "A: U %d: serving a service of type %d\n", 2, id, non_empty_index-2);
+		save_to_sem_file(sem_arr, action_cnt, "%d: U %d: serving a service of type %d\n", 3, *action_cnt, id, non_empty_index-2);
 
 		printf("Clerk tending to row with the index: %d\n", non_empty_index);
 		fflush(stdout);
@@ -240,13 +250,13 @@ void clerk_logic(int id, sem_t *sem_arr[], bool *is_closed, int tu)
 
 		rand_num = get_rand_num(0, 10);
 		usleep(rand_num);
-		save_to_sem_file(sem_arr, "A: U %d: service finished\n", 1, id);
+		save_to_sem_file(sem_arr, action_cnt, "%d: U %d: service finished\n", 2, *action_cnt, id);
 
 		continue;
 	}
 }
 
-int create_process(char type, int *cnt, sem_t *sem_arr[], bool *is_closed, int tz, int tu)
+int create_process(char type, int *cnt, sem_t *sem_arr[], bool *is_closed, int *action_cnt, int tz, int tu)
 {
 	int pid = fork();
 
@@ -254,11 +264,11 @@ int create_process(char type, int *cnt, sem_t *sem_arr[], bool *is_closed, int t
 	{
 		if(type == 'Z')
 		{
-			customer_logic(*cnt, sem_arr, is_closed, tz);
+			customer_logic(*cnt, sem_arr, is_closed, action_cnt, tz);
 		}
 		else if(type == 'U')
 		{
-			clerk_logic(*cnt, sem_arr, is_closed, tu);
+			clerk_logic(*cnt, sem_arr, is_closed, action_cnt, tu);
 		}
 		else
 		{
@@ -296,7 +306,7 @@ void destroy_sems(sem_t *sem_arr[])
 }
 
 //TODO typedef this shit cause I have no idea if even I can understand this
-void create_shared_memory(sem_t *(*sem_arr)[], int *(*customer_cnt)[], bool **is_closed)
+void create_shared_memory(sem_t *(*sem_arr)[], int *(*customer_cnt)[], int **action_cnt, bool **is_closed)
 {
 	// semaphore creation
 	for(int i = 0; i < SEM_CNT; i++)
@@ -321,6 +331,13 @@ void create_shared_memory(sem_t *(*sem_arr)[], int *(*customer_cnt)[], bool **is
 
 	// is file closed
 	if((*is_closed = (bool *)mmap(NULL, sizeof(bool), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0)) == (bool *)-1)
+	{
+		perror("Error");
+		exit(1);
+	}
+
+	// count the number of actions
+	if((*action_cnt = (int *)mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0)) == (int *)-1)
 	{
 		perror("Error");
 		exit(1);
@@ -374,10 +391,12 @@ int main(int argc, char **argv)
 	}
 	
 	bool *is_closed = NULL;
+	int *action_cnt = NULL;
 
-	create_shared_memory(&sem_arr, &customer_cnt, &is_closed);
+	create_shared_memory(&sem_arr, &customer_cnt, &action_cnt, &is_closed);
 
 	*is_closed = false;
+	*action_cnt = 1;
 	
 	//TODO maybe think about changing this 2 indents
 	for(int i = 0; i < SEM_CNT; i++)
@@ -388,9 +407,9 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 
-		if(i == 1)
+		if((i == 1) || (i == 5))
 		{
-			if(sem_init(sem_arr[1], 1, 1) == -1)
+			if(sem_init(sem_arr[i], 1, 1) == -1)
 			{
 				perror("Error");
 				return 1;
@@ -410,12 +429,12 @@ int main(int argc, char **argv)
 	int customer_count = 1, clerk_cnt = 1;
 	for(int i = 0; i < nz; i++)
 	{
-		create_process('Z', &customer_count, sem_arr, is_closed, tz, tu);
+		create_process('Z', &customer_count, sem_arr, is_closed, action_cnt, tz, tu);
 	}
 
 	for(int i = 0; i < nu; i++)
 	{
-		create_process('U', &clerk_cnt, sem_arr, is_closed, tz, tu);
+		create_process('U', &clerk_cnt, sem_arr, is_closed, action_cnt, tz, tu);
 	}
 	
 	int rand_num = get_rand_num(f/2, f);
@@ -427,7 +446,7 @@ int main(int argc, char **argv)
 	printf("Its CLOSED FUCKERS!\n");
 	fflush(stdout);
 
-	save_to_sem_file(sem_arr, "A: U %d: service finished\n", 0);
+	save_to_sem_file(sem_arr, action_cnt, "%d: closing\n", 1, *action_cnt);
 
 	// Wait for child processes to finish
 	for(int i = 0; i < nu+nz; i++)
