@@ -7,14 +7,46 @@
 #include <unistd.h> // processes
 #include <errno.h>  // TODO for errno, but it might be included already somewhere
 #include <sys/mman.h> // mmap + macros
+#include <sys/wait.h>
 #include <time.h>
 #include <stdbool.h>
 #include <stdarg.h> // TODO might be already included somewhere
 
-#define SEM_CNT 6
+#define SEM_CNT 3
+#define MUX_CNT 8
 #define ROW_CNT 3
 
 FILE *fp = NULL;
+
+/* Queue array
+	[0] -> queue 1 sem,
+	[1] -> queue 2 sem,
+	[2] -> queue 3 sem
+*/
+sem_t *sem_arr[SEM_CNT];
+
+/*  General mutex array
+	[0] -> row1 mux,
+	[1] -> row2 mux,
+	[2] -> row3 mux,
+	[3] -> action count mutex,
+	[4] -> file write mutex
+*/
+sem_t *mux_arr[MUX_CNT];
+
+/* Customer count mutex array
+	[0] -> row1 customer value mux,
+	[1] -> row2 customer value mux,
+	[2] -> row3 customer value mux,
+*/
+sem_t *cc_mux_arr[SEM_CNT];
+
+int *customer_cnt[SEM_CNT];
+
+bool *is_closed = NULL;
+int *action_cnt = NULL;
+
+
 //TODO before finishing add werror to makefile
 void help_menu()
 {
@@ -122,32 +154,29 @@ FILE *init_file()
 	return fp;
 }
 // TODO the things I believe I still need to do:
-// think about all the race conditions that could happen and try to figure out a way to fix them
-// maybe change the way memory is managed (if it works than just ignore this)
+// I probably made a lot of sleepless mistakes, but other than that it should be almost done
+// Change the random function (this is going to be fun huh)
 // add doxygen style comments to every function (not that hard, I dont have a lot of functions)
-int get_nonempty_queue(sem_t *sem_arr[], int num_arr[], int len)
+int get_nonempty_queue(int num_arr[], int len)
 {
 	if(len <= 0)
 	{
+		printf("Returned index -1\n");
 		return -1;
 	}
 
 	int index = num_arr[get_rand_num(0, len-1)];
-	int sem_val;
 
-	if(sem_getvalue(sem_arr[index], &sem_val) == -1)
+	printf("stuck in get nonempty\n");
+	run_sem_fce(sem_wait, cc_mux_arr[index]);
+	printf("at customer index (in get_nonempty_queue): %d is ?> 0 (%d)\n", index, (*customer_cnt)[index]);
+	if((*customer_cnt)[index] > 0)
 	{
-		perror("Error");
-		exit(1);
-	}
-
-	printf("The current sem_getvalue at sem %d is %d\n", index, sem_val);
-	fflush(stdout);
-
-	if(sem_val <= 0)
-	{
+		run_sem_fce(sem_post, cc_mux_arr[index]);
+		printf("Returned index %d\n", index);
 		return index;
 	}
+	run_sem_fce(sem_post, cc_mux_arr[index]);
 	
 	int new_num_arr[SEM_CNT];
 
@@ -160,103 +189,130 @@ int get_nonempty_queue(sem_t *sem_arr[], int num_arr[], int len)
 		}
 	}
 
-	return get_nonempty_queue(sem_arr, new_num_arr, len-1);
+	return get_nonempty_queue(new_num_arr, len-1);
 }
 
-void save_to_sem_file(sem_t *sem_arr[], int *action_cnt, char *str, int argc,...)
+void save_to_sem_file(char *msg, int *action_num, int id, int type)
 {
-	va_list argv;
-	va_start(argv, argc);
+	printf("stuck in one in save 3 to file\n");
+	run_sem_fce(sem_wait, mux_arr[3]);
+	printf("stuck in one in save 4 to file\n");
+	run_sem_fce(sem_wait, mux_arr[4]);
 
-	run_sem_fce(sem_wait, sem_arr[5]);
 	(*action_cnt)++;
-	run_sem_fce(sem_post, sem_arr[5]);
 
-	run_sem_fce(sem_wait, sem_arr[1]);
-	vfprintf(fp, str, argv);
-	fflush(fp);
-	run_sem_fce(sem_post, sem_arr[1]);
+	if(id != -1)
+	{
+		if(type != -1)
+		{
+			fprintf(fp, msg, *action_num, id, type);
+		}
+		else
+		{
+			fprintf(fp, msg, *action_num, id);
+		}
+	}
+	else
+	{
+		fprintf(fp, msg, *action_num);
+	}
+
+	run_sem_fce(sem_post, mux_arr[4]);
+	run_sem_fce(sem_post, mux_arr[3]);
 }
 
-void customer_logic(int id, sem_t *sem_arr[], bool *is_closed, int *action_cnt, int tz)
+void customer_logic(int id, int tz)
 {
-	save_to_sem_file(sem_arr, action_cnt, "%d: Z %d: started\n", 2, *action_cnt, id);
+	save_to_sem_file("%d: Z %d: started\n", action_cnt, id, -1);
 
 	int rand_num = get_rand_num(0, tz);
 	usleep(rand_num);
 
 	if(*is_closed)
 	{
-		save_to_sem_file(sem_arr, action_cnt, "%d: Z %d: going home\n", 2, *action_cnt, id);
+		save_to_sem_file("%d: Z %d: going home\n", action_cnt, id, -1);
 		return;
 	}
 
-	rand_num = get_rand_num(1, 3);
-	save_to_sem_file(sem_arr, action_cnt, "%d: Z %d: entering office for a service %d\n", 3, *action_cnt, id, rand_num);
+	rand_num = get_rand_num(0, 2);
+	save_to_sem_file("%d: Z %d: entering office for a service %d\n", action_cnt, id, rand_num+1);
+	
+	// inc customer count in a mutex
+	printf("stuck in cc_mux_arr\n");
+	run_sem_fce(sem_wait, cc_mux_arr[rand_num]);
+	printf("Customer %d before: %d, and ", rand_num, (*customer_cnt)[rand_num]);
+	(*customer_cnt)[rand_num]++;
+	printf("after: %d\n", (*customer_cnt)[rand_num]);
+	run_sem_fce(sem_post, cc_mux_arr[rand_num]);
 
-	// rows are indexed as row number + 1
-	printf("Customer waiting at row with the index: %d\n", rand_num+1);
-	fflush(stdout);
+	printf("stuck in sem_arr[rand_num]\n");
+	run_sem_fce(sem_wait, sem_arr[rand_num]);
 
-	run_sem_fce(sem_wait, sem_arr[rand_num+1]);
-	save_to_sem_file(sem_arr, action_cnt, "%d: Z %d: called by office worker\n", 2, *action_cnt, id);
+	save_to_sem_file("%d: Z %d: called by office worker\n", action_cnt, id, -1);
 
 	rand_num = get_rand_num(0, 10);
 	usleep(rand_num);
 
-	save_to_sem_file(sem_arr, action_cnt, "%d: Z %d: going home\n", 2, *action_cnt, id);
+	save_to_sem_file("%d: Z %d: going home\n", action_cnt, id, -1);
 }
 
-void clerk_logic(int id, sem_t *sem_arr[], bool *is_closed, int *action_cnt, int tu)
+void clerk_logic(int id, int tu)
 {
-	save_to_sem_file(sem_arr, action_cnt, "%d: U %d: started\n", 2, *action_cnt, id);
+	save_to_sem_file("%d: U %d: started\n", action_cnt, id, -1);
 	
-	int non_empty_index = -1, rand_num = 0;
-	int index_arr[] = {2, 3, 4};
+	int index = -1, rand_num = 0;
+	int index_arr[] = {0, 1, 2};
 	while(true)
 	{
-		non_empty_index = get_nonempty_queue(sem_arr, index_arr, 3);
-		if(non_empty_index == -1)
+		//TODO change 
+		index = get_nonempty_queue(index_arr, 3);
+		if(index == -1)
 		{
-			printf("is closed?(%d)\n", *is_closed);
-			fflush(stdout);
 
 			if(*is_closed == true)
 			{
-				printf("yes its closed\n");
-				fflush(stdout);
-				save_to_sem_file(sem_arr, action_cnt, "%d: U %d: going home\n", 2, *action_cnt, id);
+				save_to_sem_file("%d: U %d: going home\n", action_cnt, id, -1);
 
 				return;
 			}
 			
-			printf("no its open\n");
-			fflush(stdout);
-			save_to_sem_file(sem_arr, action_cnt, "%d: U %d: taking a break\n", 2, *action_cnt, id);
+			save_to_sem_file("%d: U %d: taking a break\n", action_cnt, id, -1);
 
 			rand_num = get_rand_num(0, tu);
 			usleep(rand_num);
-			save_to_sem_file(sem_arr, action_cnt, "%d: U %d: break finished\n", 2, *action_cnt, id);
+			save_to_sem_file("%d: U %d: break finished\n", action_cnt, id, -1);
 
 			continue;
 		}
 
-		// indexes of types are offset by 2
-		save_to_sem_file(sem_arr, action_cnt, "%d: U %d: serving a service of type %d\n", 3, *action_cnt, id, non_empty_index-2);
+		printf("[PROBLEM] mux arr wait index: %d\n", index);
+		run_sem_fce(sem_wait, mux_arr[index]);
 
-		printf("Clerk tending to row with the index: %d\n", non_empty_index);
-		fflush(stdout);
-		run_sem_fce(sem_post, sem_arr[non_empty_index]);
+		// indexes of types are offset by 2
+		save_to_sem_file("%d: U %d: serving a service of type %d\n", action_cnt, id, index+1);
+
+		// dec customer count in a mutex
+		printf("stuck in cc_mux_arr[rand_num] in clerk\n");
+		run_sem_fce(sem_wait, cc_mux_arr[index]);
+		printf("decremented customer_cnt[%d] to: ", index);
+		(*customer_cnt[index])--;
+		printf("'%d'\n", *customer_cnt[index]);
+		run_sem_fce(sem_post, sem_arr[index]);
+
+		run_sem_fce(sem_post, cc_mux_arr[index]);
 
 		rand_num = get_rand_num(0, 10);
 		usleep(rand_num);
-		save_to_sem_file(sem_arr, action_cnt, "%d: U %d: service finished\n", 2, *action_cnt, id);
+		save_to_sem_file("%d: U %d: service finished\n", action_cnt, id, -1);
+
+		printf("[PROBLEM] mux arr wait index: %d [RELEASE]\n", index);
+		run_sem_fce(sem_post, mux_arr[index]);
 
 		continue;
 	}
 }
 
-int create_process(char type, int *cnt, sem_t *sem_arr[], bool *is_closed, int *action_cnt, int tz, int tu)
+int create_process(char type, int *cnt, int tz, int tu)
 {
 	int pid = fork();
 
@@ -264,11 +320,11 @@ int create_process(char type, int *cnt, sem_t *sem_arr[], bool *is_closed, int *
 	{
 		if(type == 'Z')
 		{
-			customer_logic(*cnt, sem_arr, is_closed, action_cnt, tz);
+			customer_logic(*cnt, tz);
 		}
 		else if(type == 'U')
 		{
-			clerk_logic(*cnt, sem_arr, is_closed, action_cnt, tu);
+			clerk_logic(*cnt, tu);
 		}
 		else
 		{
@@ -277,7 +333,6 @@ int create_process(char type, int *cnt, sem_t *sem_arr[], bool *is_closed, int *
 		}
 		
 		fclose(fp);
-		sem_post(sem_arr[0]);
 		exit(0);
 	}
 	else if(pid > 0)
@@ -294,7 +349,7 @@ int create_process(char type, int *cnt, sem_t *sem_arr[], bool *is_closed, int *
 	return pid;
 }
 
-void destroy_sems(sem_t *sem_arr[])
+void destroy_sems()
 {
 	for(int i = 0; i < SEM_CNT; i++)
 	{
@@ -305,24 +360,40 @@ void destroy_sems(sem_t *sem_arr[])
 	}
 }
 
-//TODO typedef this shit cause I have no idea if even I can understand this
-void create_shared_memory(sem_t *(*sem_arr)[], int *(*customer_cnt)[], int **action_cnt, bool **is_closed)
+void create_shared_memory()
 {
-	// semaphore creation
 	for(int i = 0; i < SEM_CNT; i++)
 	{
-		//TODO fail?
-		if(((*sem_arr)[i] = (sem_t *)mmap(NULL, sizeof(sem_t *), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0)) == (sem_t *)-1)
+		// semaphore creation
+		sem_arr[i] = (sem_t *)mmap(NULL, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+		if(sem_arr[i] == MAP_FAILED)
+		{
+			perror("Error");
+			exit(1);
+		}
+
+		// customer count creation
+		customer_cnt[i] = (int *)mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+		if(customer_cnt[i] == MAP_FAILED)
+		{
+			perror("Error");
+			exit(1);
+		}
+
+		// customer count mutex creation
+		cc_mux_arr[i] = (sem_t *)mmap(NULL, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+		if(cc_mux_arr[i] == MAP_FAILED)
 		{
 			perror("Error");
 			exit(1);
 		}
 	}
 
-	// customer count creation
-	for(int i = 0; i < SEM_CNT; i++)
+	// mutex creation
+	for(int i = 0; i < MUX_CNT; i++)
 	{
-		if(((*customer_cnt)[i] = (int *)mmap(NULL, sizeof(int *), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0)) == (int *)-1)
+		mux_arr[i] = (sem_t *)mmap(NULL, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+		if(mux_arr[i] == MAP_FAILED)
 		{
 			perror("Error");
 			exit(1);
@@ -330,14 +401,50 @@ void create_shared_memory(sem_t *(*sem_arr)[], int *(*customer_cnt)[], int **act
 	}
 
 	// is file closed
-	if((*is_closed = (bool *)mmap(NULL, sizeof(bool), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0)) == (bool *)-1)
+	is_closed = (bool *)mmap(NULL, sizeof(bool), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+	if(is_closed == MAP_FAILED)
 	{
 		perror("Error");
 		exit(1);
 	}
 
 	// count the number of actions
-	if((*action_cnt = (int *)mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0)) == (int *)-1)
+	action_cnt = (int *)mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+	if(action_cnt == MAP_FAILED)
+	{
+		perror("Error");
+		exit(1);
+	}
+}
+
+//TODO not sure this works correctly byt we'll see, especially with perror
+void delete_shared_memory()
+{
+	for(int i = 0; i < SEM_CNT; i++)
+	{
+		if(munmap(sem_arr[i], sizeof(sem_t)) == -1)
+		{
+			perror("Error");
+			exit(1);
+		}
+	}
+
+	for(int i = 0; i < SEM_CNT; i++)
+	{
+		if(munmap(customer_cnt[i], sizeof(int)) == -1)
+		{
+			perror("Error");
+			exit(1);
+		}
+	}
+
+	if(munmap(is_closed, sizeof(bool)) == -1)
+	{
+		perror("Error");
+		exit(1);
+	}
+
+	if(munmap(action_cnt, sizeof(int)) == -1)
 	{
 		perror("Error");
 		exit(1);
@@ -375,30 +482,43 @@ int main(int argc, char **argv)
 	int nz = atoi(argv[1]), nu = atoi(argv[2]), tz = atoi(argv[3]), tu = atoi(argv[4]), f = atoi(argv[5]);
 	
 	fp = init_file();
-	//anything that happens here is thread safe, because no other process will ever get here and its started before any processes are forked
-	// [0] -> exit counter, [1] -> writer mutex, [2] -> row/line 1, [3] -> row/line 2, [4] -> row/line3
-	sem_t *sem_arr[SEM_CNT];
-	int *customer_cnt[ROW_CNT];
+	setbuf(fp, NULL);
+	setbuf(stdout, NULL); //TODO debug remove later
 
 	for(int i = 0; i < SEM_CNT; i++)
 	{
 		sem_arr[i] = NULL;
-	}
-
-	for(int i = 0; i < ROW_CNT; i++)
-	{
 		customer_cnt[i] = NULL;
+		cc_mux_arr[i] = NULL;
 	}
-	
-	bool *is_closed = NULL;
-	int *action_cnt = NULL;
 
-	create_shared_memory(&sem_arr, &customer_cnt, &action_cnt, &is_closed);
+	for(int i = 0; i < MUX_CNT; i++)
+	{
+		mux_arr[i] = NULL;
+	}
+
+	create_shared_memory();
 
 	*is_closed = false;
-	*action_cnt = 1;
+	*action_cnt = 0;
 	
-	//TODO maybe think about changing this 2 indents
+	// initialized mutexes
+	for(int i = 0; i < MUX_CNT; i++)
+	{
+		if(mux_arr[i] == NULL)
+		{
+			fprintf(stderr, "Error: Non existant mutex trying to be initialized\n");
+			exit(1);
+		}
+
+		if(sem_init(mux_arr[i], 1, 1) == -1)
+		{
+			perror("Error");
+			return 1;
+		}
+	}
+	
+	// initialized semaphores
 	for(int i = 0; i < SEM_CNT; i++)
 	{
 		if(sem_arr[i] == NULL)
@@ -407,54 +527,47 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 
-		if((i == 1) || (i == 5))
+		if(cc_mux_arr[i] == NULL)
 		{
-			if(sem_init(sem_arr[i], 1, 1) == -1)
-			{
-				perror("Error");
-				return 1;
-			}
+			fprintf(stderr, "Error: Non existant semaphore trying to be initialized\n");
+			exit(1);
 		}
-		else
+
+		if(sem_init(sem_arr[i], 1, 0) == -1)
 		{
-			if(sem_init(sem_arr[i], 1, 0) == -1)
-			{
-				perror("Error");
-				return 1;
-			}
+			perror("Error");
+			exit(1);
+		}
+
+		if(sem_init(cc_mux_arr[i], 1, 1) == -1)
+		{
+			perror("Error");
+			exit(1);
 		}
 	}
 
-	// main program loop
-	int customer_count = 1, clerk_cnt = 1;
+	int customer_count = 1, clerk_count = 1;
 	for(int i = 0; i < nz; i++)
 	{
-		create_process('Z', &customer_count, sem_arr, is_closed, action_cnt, tz, tu);
+		create_process('Z', &customer_count, tz, tu);
 	}
 
 	for(int i = 0; i < nu; i++)
 	{
-		create_process('U', &clerk_cnt, sem_arr, is_closed, action_cnt, tz, tu);
+		create_process('U', &clerk_count, tz, tu);
 	}
 	
 	int rand_num = get_rand_num(f/2, f);
 	usleep(rand_num);
-	
-	printf("Its not closed!\n");
-	fflush(stdout);
-	*is_closed = true;
-	printf("Its CLOSED FUCKERS!\n");
-	fflush(stdout);
 
-	save_to_sem_file(sem_arr, action_cnt, "%d: closing\n", 1, *action_cnt);
+	*is_closed = true;
+
+	save_to_sem_file("%d: closing\n", action_cnt, -1, -1);
 
 	// Wait for child processes to finish
-	for(int i = 0; i < nu+nz; i++)
-	{
-		run_sem_fce(sem_wait, sem_arr[0]);	
-	}
+	while(wait(NULL) > 0);
 	
-	printf("finished!\n");
-	destroy_sems(sem_arr);
+	destroy_sems();
+	delete_shared_memory();
 	fclose(fp);
 }
