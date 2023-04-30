@@ -3,28 +3,27 @@
 #include <ctype.h> //call to isdigit
 #include <semaphore.h>
 #include <string.h>
-#include <signal.h> // C-c safeguard
 #include <unistd.h> // processes
-#include <errno.h>  // TODO for errno, but it might be included already somewhere
 #include <sys/mman.h> // mmap + macros
 #include <sys/wait.h>
 #include <time.h>
 #include <stdbool.h>
-#include <stdarg.h> // TODO might be already included somewhere
 
 #define SEM_CNT 3
 #define MUX_CNT 6
 
 FILE *fp = NULL;
 
-/* Queue array
+//! Queue array
+/*!
 	[0] -> queue 1 sem,
 	[1] -> queue 2 sem,
 	[2] -> queue 3 sem
 */
 sem_t *sem_arr[SEM_CNT];
 
-/*  General mutex array
+//! General mutex array
+/*!
 	[0] -> row1 mux,
 	[1] -> row2 mux,
 	[2] -> row3 mux,
@@ -34,20 +33,25 @@ sem_t *sem_arr[SEM_CNT];
 */
 sem_t *mux_arr[MUX_CNT];
 
-/* Customer count mutex array
+//! Customer count mutex array
+/*!
 	[0] -> row1 customer value mux,
 	[1] -> row2 customer value mux,
 	[2] -> row3 customer value mux,
 */
 sem_t *cc_mux_arr[SEM_CNT];
 
+//! An array for keeping track of how many customers are in each row.
 int *customer_cnt[SEM_CNT];
 
+//! A variable to keep track if the file is closed.
 bool *is_closed = NULL;
+
+//! A variable to keep track of the actions that occured.
 int *action_cnt = NULL;
 
-
-//TODO before finishing add werror to makefile
+/** A simple function that print out the help menu (not in assignment, but doesn't interfere).
+*/
 void help_menu()
 {
 	printf("Usage:\n");
@@ -61,16 +65,12 @@ void help_menu()
 	printf("\tF: maximum time in milliseconds that the post office is closed to new customers. 0<=F<=10000\n");
 }
 
-void cleanup(int signum)
-{
-	(void) signum;
-	if(fp != NULL)
-	{
-		fclose(fp);
-	}
-}
-
-//TODO maybe make a better version of random. There are various problems with rand and this implementation in general
+/** A function that returns a random number.
+*
+*	Uses the rand() function to return a pseudo random number from min to max inclusively.
+*	@param min The smallest possible number returned.
+*	@param max The largest possible number returned.
+*/
 int get_rand_num(int min, int max)
 {
 	max++;
@@ -87,6 +87,12 @@ int get_rand_num(int min, int max)
 	return ret;
 }
 
+/** A function that checks if a given string is a number
+*
+*	If the string is not a number, then it returns an error.
+*	Used as a clause to protect against undefined behavior.
+*	@param str The string to be checked.
+*/
 void is_num(char *str)
 {
 	for(unsigned int j = 0; j < strlen(str); j++)
@@ -99,6 +105,13 @@ void is_num(char *str)
 	}
 }
 
+/** A function that executes a specified semaphore function.
+*
+*	This function is used to removed repetative code checks whether the function was perfored successfully or not.
+*	The function that will be executed can only take one parameter and that is the semaphore.
+*	@param f The function that will be executed, usually one of these (sem_close, sem_destroy, sem_post, sem_wait).
+*	@param semaphore The semaphore to be used as the argument to the executed function.
+*/
 void run_sem_fce(int (*f)(sem_t *), sem_t *semaphore)
 {
 	if((*f)(semaphore) == -1)
@@ -108,6 +121,10 @@ void run_sem_fce(int (*f)(sem_t *), sem_t *semaphore)
 	}
 }
 
+/**	A simple function that checks if each argument legal within the function of this code.
+*	@param argc The length of the argument array.
+*	@param argv The arguments to be checked.
+*/
 void check_args(int argc, char **argv)
 {
 	for(int i = 1; i < argc; i++)
@@ -152,6 +169,8 @@ void check_args(int argc, char **argv)
 	}
 }
 
+/** A function that opens a file.
+*/
 FILE *init_file()
 {
 	char filename[] = "proj2.out";
@@ -166,10 +185,15 @@ FILE *init_file()
 
 	return fp;
 }
-// TODO the things I believe I still need to do:
-// I probably made a lot of sleepless mistakes, but other than that it should be almost done
-// Change the random function (this is going to be fun huh)
-// add doxygen style comments to every function (not that hard, I dont have a lot of functions)
+
+/** A function that return a random value from the given arguments.
+*
+*	Takes the array of numbers and randomly chooses one, then it checks if the semaphore of that randomly
+*	picked number is blocked (count > 0)  and if so it returns said index, else it pickes another random index recursively.
+*	@param num_arr The number array from which it randomly pickes an element.
+*	@param len Then length of the array.
+*	@return The index of the semaphore that isn't empty, or -1 if all are empty.
+*/
 int get_nonempty_queue(int num_arr[], int len)
 {
 	if(len <= 0)
@@ -205,6 +229,14 @@ int get_nonempty_queue(int num_arr[], int len)
 	return get_nonempty_queue(new_num_arr, len-1);
 }
 
+/** A function that saves the given text into a file.
+*
+*	The writing of the file is also guared by a semaphore and so is the incrementation of the action counter.
+*	@param msg The string message to be saved into the file.
+*	@param action_num The number of the current action.
+*	@param id The id of the process that evoked the action.
+*	@param type The type of service.
+*/
 void save_to_sem_file(char *msg, int *action_num, int id, int type)
 {
 	run_sem_fce(sem_wait, mux_arr[3]);
@@ -232,6 +264,10 @@ void save_to_sem_file(char *msg, int *action_num, int id, int type)
 	run_sem_fce(sem_post, mux_arr[3]);
 }
 
+/** A function that dictates the logic of the customer process.
+*	@param id The id of the current process.
+*	@param tz The customer max wait time.
+*/
 void customer_logic(int id, int tz)
 {
 	save_to_sem_file("%d: Z %d: started\n", action_cnt, id, -1);
@@ -248,11 +284,12 @@ void customer_logic(int id, int tz)
 	}
 
 	rand_num = get_rand_num(0, 2);
-	save_to_sem_file("%d: Z %d: entering office for a service %d\n", action_cnt, id, rand_num+1);
-	
 	// inc customer count in a mutex
 	run_sem_fce(sem_wait, cc_mux_arr[rand_num]);
+
+	save_to_sem_file("%d: Z %d: entering office for a service %d\n", action_cnt, id, rand_num+1);
 	(*(customer_cnt[rand_num]))++;
+
 	run_sem_fce(sem_post, cc_mux_arr[rand_num]);
 
 	run_sem_fce(sem_post, mux_arr[5]);
@@ -267,6 +304,10 @@ void customer_logic(int id, int tz)
 	save_to_sem_file("%d: Z %d: going home\n", action_cnt, id, -1);
 }
 
+/** A function that dictates the logic of the clerk process.
+*	@param id The id of the current process.
+*	@param tu Maximum break time.
+*/
 void clerk_logic(int id, int tu)
 {
 	save_to_sem_file("%d: U %d: started\n", action_cnt, id, -1);
@@ -275,8 +316,6 @@ void clerk_logic(int id, int tu)
 	int index_arr[] = {0, 1, 2};
 	while(true)
 	{
-		//TODO change 
-		fflush(stdout);
 		index = get_nonempty_queue(index_arr, 3);
 		if(index == -1)
 		{
@@ -289,7 +328,7 @@ void clerk_logic(int id, int tu)
 				return;
 			}
 
-			save_to_sem_file("%d: U %d: taking a break\n", action_cnt, id, -1);
+			save_to_sem_file("%d: U %d: taking break\n", action_cnt, id, -1);
 			run_sem_fce(sem_post, mux_arr[5]);
 
 			rand_num = get_rand_num(0, tu);
@@ -316,6 +355,15 @@ void clerk_logic(int id, int tu)
 	}
 }
 
+/** A function that creates the processes and increments their count.
+*
+*	These processes are split based on the first parameter.
+*	@param type The type of process that the child is going to be. Valid ones include 'Z' and 'U'.
+*	@param cnt The counter for the amount of processes.
+*	@param tz The maximum time a customer waits before creation (passed to logic function).
+*	@param tu The maximum time of a clerks break (passed to logic function).
+*	@return The pid of the created process.
+*/
 int create_process(char type, int *cnt, int tz, int tu)
 {
 	int pid = fork();
@@ -354,6 +402,8 @@ int create_process(char type, int *cnt, int tz, int tu)
 	return pid;
 }
 
+/** A function that destroys all the previously created semaphores.
+*/
 void destroy_sems()
 {
 	for(int i = 0; i < SEM_CNT; i++)
@@ -362,9 +412,24 @@ void destroy_sems()
 		{
 			run_sem_fce(sem_destroy, sem_arr[i]);
 		}
+
+		if(cc_mux_arr[i] != NULL)
+		{
+			run_sem_fce(sem_destroy, cc_mux_arr[i]);
+		}
+	}
+
+	for(int i = 0; i < MUX_CNT; i++)
+	{
+		if(mux_arr[i] != NULL)
+		{
+			run_sem_fce(sem_destroy, mux_arr[i]);
+		}
 	}
 }
 
+/** A function to create all the shared memory for the correct use of this program.
+*/
 void create_shared_memory()
 {
 	for(int i = 0; i < SEM_CNT; i++)
@@ -413,7 +478,7 @@ void create_shared_memory()
 		exit(1);
 	}
 
-	// count the number of actions
+	// counts the number of actions
 	action_cnt = (int *)mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
 	if(action_cnt == MAP_FAILED)
 	{
@@ -422,7 +487,8 @@ void create_shared_memory()
 	}
 }
 
-//TODO not sure this works correctly byt we'll see, especially with perror
+/** A function to unmap all the shared memory that the program created (explicitly).
+*/
 void delete_shared_memory()
 {
 	for(int i = 0; i < SEM_CNT; i++)
@@ -432,11 +498,23 @@ void delete_shared_memory()
 			perror("Error");
 			exit(1);
 		}
+
+		if(munmap(cc_mux_arr[i], sizeof(sem_t)) == -1)
+		{
+			perror("Error");
+			exit(1);
+		}
+
+		if(munmap(customer_cnt[i], sizeof(int)) == -1)
+		{
+			perror("Error");
+			exit(1);
+		}
 	}
 
-	for(int i = 0; i < SEM_CNT; i++)
+	for(int i = 0; i < MUX_CNT; i++)
 	{
-		if(munmap(customer_cnt[i], sizeof(int)) == -1)
+		if(munmap(mux_arr[i], sizeof(sem_t)) == -1)
 		{
 			perror("Error");
 			exit(1);
@@ -460,8 +538,6 @@ int main(int argc, char **argv)
 {
 	// get a pseudo random seed different for each process
 	srand(time(NULL) ^ getpid());
-
-	signal(SIGINT, cleanup);
 
 	if(strcmp(argv[1], "-h") == 0)
 	{
@@ -571,7 +647,7 @@ int main(int argc, char **argv)
 
 	run_sem_fce(sem_post, mux_arr[5]);
 
-	// Wait for child processes to finish
+	// Wait for children processes to finish
 	while(wait(NULL) > 0);
 	
 	destroy_sems();
