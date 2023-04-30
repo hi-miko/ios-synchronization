@@ -13,8 +13,7 @@
 #include <stdarg.h> // TODO might be already included somewhere
 
 #define SEM_CNT 3
-#define MUX_CNT 8
-#define ROW_CNT 3
+#define MUX_CNT 6
 
 FILE *fp = NULL;
 
@@ -29,8 +28,9 @@ sem_t *sem_arr[SEM_CNT];
 	[0] -> row1 mux,
 	[1] -> row2 mux,
 	[2] -> row3 mux,
-	[3] -> action count mutex,
-	[4] -> file write mutex
+	[3] -> action count mux,
+	[4] -> file write mux
+	[5] -> is closed mux
 */
 sem_t *mux_arr[MUX_CNT];
 
@@ -116,6 +116,20 @@ void check_args(int argc, char **argv)
 	}
 
 	//atoi will only be run on numbered strings
+	int NZ = atoi(argv[1]);
+	if(NZ < 0)
+	{
+		fprintf(stderr, "Error: argument 'NZ' has to be bigger bigger or equal to 0\n");
+		exit(1);
+	}
+
+	int NU = atoi(argv[2]);
+	if(NU <= 0)
+	{
+		fprintf(stderr, "Error: argument 'NU' has to be bigger than 0\n");
+		exit(1);
+	}
+
 	int TZ = atoi(argv[3]);
 	if(TZ < 0 || TZ > 10000)
 	{
@@ -143,7 +157,6 @@ FILE *init_file()
 	char filename[] = "proj2.out";
 	FILE *fp = NULL;
 	
-	// TODO the thought is that it will first clear the file and then open for appending, but I might be able to just open for writing
 	fp = fopen(filename, "w");
 	if(fp == NULL)
 	{
@@ -161,19 +174,19 @@ int get_nonempty_queue(int num_arr[], int len)
 {
 	if(len <= 0)
 	{
-		printf("Returned index -1\n");
 		return -1;
 	}
-
+	
+	// -1 because array indexes are indexed from 0
 	int index = num_arr[get_rand_num(0, len-1)];
 
-	printf("stuck in get nonempty\n");
 	run_sem_fce(sem_wait, cc_mux_arr[index]);
-	printf("at customer index (in get_nonempty_queue): %d is ?> 0 (%d)\n", index, (*customer_cnt)[index]);
-	if((*customer_cnt)[index] > 0)
+	if(*(customer_cnt[index]) > 0)
 	{
+		// dec customer count in a mutex
+		(*(customer_cnt[index]))--;
+
 		run_sem_fce(sem_post, cc_mux_arr[index]);
-		printf("Returned index %d\n", index);
 		return index;
 	}
 	run_sem_fce(sem_post, cc_mux_arr[index]);
@@ -194,9 +207,7 @@ int get_nonempty_queue(int num_arr[], int len)
 
 void save_to_sem_file(char *msg, int *action_num, int id, int type)
 {
-	printf("stuck in one in save 3 to file\n");
 	run_sem_fce(sem_wait, mux_arr[3]);
-	printf("stuck in one in save 4 to file\n");
 	run_sem_fce(sem_wait, mux_arr[4]);
 
 	(*action_cnt)++;
@@ -228,24 +239,23 @@ void customer_logic(int id, int tz)
 	int rand_num = get_rand_num(0, tz);
 	usleep(rand_num);
 
+	run_sem_fce(sem_wait, mux_arr[5]);
 	if(*is_closed)
 	{
+		run_sem_fce(sem_post, mux_arr[5]);
 		save_to_sem_file("%d: Z %d: going home\n", action_cnt, id, -1);
 		return;
 	}
+	run_sem_fce(sem_post, mux_arr[5]);
 
 	rand_num = get_rand_num(0, 2);
 	save_to_sem_file("%d: Z %d: entering office for a service %d\n", action_cnt, id, rand_num+1);
 	
 	// inc customer count in a mutex
-	printf("stuck in cc_mux_arr\n");
 	run_sem_fce(sem_wait, cc_mux_arr[rand_num]);
-	printf("Customer %d before: %d, and ", rand_num, (*customer_cnt)[rand_num]);
-	(*customer_cnt)[rand_num]++;
-	printf("after: %d\n", (*customer_cnt)[rand_num]);
+	(*(customer_cnt[rand_num]))++;
 	run_sem_fce(sem_post, cc_mux_arr[rand_num]);
 
-	printf("stuck in sem_arr[rand_num]\n");
 	run_sem_fce(sem_wait, sem_arr[rand_num]);
 
 	save_to_sem_file("%d: Z %d: called by office worker\n", action_cnt, id, -1);
@@ -265,18 +275,21 @@ void clerk_logic(int id, int tu)
 	while(true)
 	{
 		//TODO change 
+		fflush(stdout);
 		index = get_nonempty_queue(index_arr, 3);
 		if(index == -1)
 		{
 
+			run_sem_fce(sem_wait, mux_arr[5]);
 			if(*is_closed == true)
 			{
+				run_sem_fce(sem_post, mux_arr[5]);
 				save_to_sem_file("%d: U %d: going home\n", action_cnt, id, -1);
-
 				return;
 			}
-			
+
 			save_to_sem_file("%d: U %d: taking a break\n", action_cnt, id, -1);
+			run_sem_fce(sem_post, mux_arr[5]);
 
 			rand_num = get_rand_num(0, tu);
 			usleep(rand_num);
@@ -285,27 +298,17 @@ void clerk_logic(int id, int tu)
 			continue;
 		}
 
-		printf("[PROBLEM] mux arr wait index: %d\n", index);
 		run_sem_fce(sem_wait, mux_arr[index]);
 
-		// indexes of types are offset by 2
+		// indexes of types are offset by 1
 		save_to_sem_file("%d: U %d: serving a service of type %d\n", action_cnt, id, index+1);
 
-		// dec customer count in a mutex
-		printf("stuck in cc_mux_arr[rand_num] in clerk\n");
-		run_sem_fce(sem_wait, cc_mux_arr[index]);
-		printf("decremented customer_cnt[%d] to: ", index);
-		(*customer_cnt[index])--;
-		printf("'%d'\n", *customer_cnt[index]);
 		run_sem_fce(sem_post, sem_arr[index]);
-
-		run_sem_fce(sem_post, cc_mux_arr[index]);
 
 		rand_num = get_rand_num(0, 10);
 		usleep(rand_num);
 		save_to_sem_file("%d: U %d: service finished\n", action_cnt, id, -1);
 
-		printf("[PROBLEM] mux arr wait index: %d [RELEASE]\n", index);
 		run_sem_fce(sem_post, mux_arr[index]);
 
 		continue;
@@ -559,8 +562,10 @@ int main(int argc, char **argv)
 	
 	int rand_num = get_rand_num(f/2, f);
 	usleep(rand_num);
-
+	
+	run_sem_fce(sem_wait, mux_arr[5]);
 	*is_closed = true;
+	run_sem_fce(sem_post, mux_arr[5]);
 
 	save_to_sem_file("%d: closing\n", action_cnt, -1, -1);
 
