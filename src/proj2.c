@@ -12,6 +12,8 @@
 #define SEM_CNT 3
 #define MUX_CNT 6
 
+void cleanup();
+
 FILE *fp = NULL;
 
 //! Queue array
@@ -78,6 +80,7 @@ int get_rand_num(int min, int max)
 	if(difference <= 0)
 	{
 		fprintf(stderr, "Error: min has to be exclusively bigger than max\n");
+		cleanup();
 		exit(1);
 	}
 
@@ -100,6 +103,7 @@ void is_num(char *str)
 		if(!isdigit(str[j]))
 		{
 			fprintf(stderr, "Error: arguments can only be numbers\n");
+			cleanup();
 			exit(1);
 		}
 	}
@@ -117,6 +121,7 @@ void run_sem_fce(int (*f)(sem_t *), sem_t *semaphore)
 	if((*f)(semaphore) == -1)
 	{
 		perror("Error");
+		cleanup();
 		exit(1);
 	}
 }
@@ -382,6 +387,7 @@ int create_process(char type, int *cnt, int tz, int tu)
 		else
 		{
 			fprintf(stderr, "Error: unknown process type\n");
+			cleanup();
 			exit(1);
 		}
 		
@@ -396,6 +402,7 @@ int create_process(char type, int *cnt, int tz, int tu)
 	else
 	{
 		fprintf(stderr, "Error: creating process\n");
+		cleanup();
 		exit(1);
 	}
 
@@ -534,6 +541,15 @@ void delete_shared_memory()
 	}
 }
 
+/** A simple function that cleans up all the used resorces.
+*/
+void cleanup()
+{
+	destroy_sems();
+	delete_shared_memory();
+	fclose(fp);
+}
+
 int main(int argc, char **argv)
 {
 	// get a pseudo random seed different for each process
@@ -588,12 +604,14 @@ int main(int argc, char **argv)
 		if(mux_arr[i] == NULL)
 		{
 			fprintf(stderr, "Error: Non existant mutex trying to be initialized\n");
+			cleanup();
 			exit(1);
 		}
 
 		if(sem_init(mux_arr[i], 1, 1) == -1)
 		{
 			perror("Error");
+			cleanup();
 			return 1;
 		}
 	}
@@ -604,24 +622,28 @@ int main(int argc, char **argv)
 		if(sem_arr[i] == NULL)
 		{
 			fprintf(stderr, "Error: Non existant semaphore trying to be initialized\n");
+			cleanup();
 			exit(1);
 		}
 
 		if(cc_mux_arr[i] == NULL)
 		{
 			fprintf(stderr, "Error: Non existant semaphore trying to be initialized\n");
+			cleanup();
 			exit(1);
 		}
 
 		if(sem_init(sem_arr[i], 1, 0) == -1)
 		{
 			perror("Error");
+			cleanup();
 			exit(1);
 		}
 
 		if(sem_init(cc_mux_arr[i], 1, 1) == -1)
 		{
 			perror("Error");
+			cleanup();
 			exit(1);
 		}
 	}
@@ -650,7 +672,5 @@ int main(int argc, char **argv)
 	// Wait for children processes to finish
 	while(wait(NULL) > 0);
 	
-	destroy_sems();
-	delete_shared_memory();
-	fclose(fp);
+	cleanup();
 }
