@@ -246,7 +246,6 @@ void customer_logic(int id, int tz)
 		save_to_sem_file("%d: Z %d: going home\n", action_cnt, id, -1);
 		return;
 	}
-	run_sem_fce(sem_post, mux_arr[5]);
 
 	rand_num = get_rand_num(0, 2);
 	save_to_sem_file("%d: Z %d: entering office for a service %d\n", action_cnt, id, rand_num+1);
@@ -255,6 +254,8 @@ void customer_logic(int id, int tz)
 	run_sem_fce(sem_wait, cc_mux_arr[rand_num]);
 	(*(customer_cnt[rand_num]))++;
 	run_sem_fce(sem_post, cc_mux_arr[rand_num]);
+
+	run_sem_fce(sem_post, mux_arr[5]);
 
 	run_sem_fce(sem_wait, sem_arr[rand_num]);
 
@@ -321,6 +322,7 @@ int create_process(char type, int *cnt, int tz, int tu)
 
 	if(pid == 0)
 	{
+		srand(time(NULL) ^ getpid());
 		if(type == 'Z')
 		{
 			customer_logic(*cnt, tz);
@@ -456,8 +458,8 @@ void delete_shared_memory()
 
 int main(int argc, char **argv)
 {
-	// get a pseudo random seed
-	srand(time(NULL));
+	// get a pseudo random seed different for each process
+	srand(time(NULL) ^ getpid());
 
 	signal(SIGINT, cleanup);
 
@@ -486,7 +488,6 @@ int main(int argc, char **argv)
 	
 	fp = init_file();
 	setbuf(fp, NULL);
-	setbuf(stdout, NULL); //TODO debug remove later
 
 	for(int i = 0; i < SEM_CNT; i++)
 	{
@@ -564,10 +565,11 @@ int main(int argc, char **argv)
 	usleep(rand_num);
 	
 	run_sem_fce(sem_wait, mux_arr[5]);
-	*is_closed = true;
-	run_sem_fce(sem_post, mux_arr[5]);
 
+	*is_closed = true;
 	save_to_sem_file("%d: closing\n", action_cnt, -1, -1);
+
+	run_sem_fce(sem_post, mux_arr[5]);
 
 	// Wait for child processes to finish
 	while(wait(NULL) > 0);
